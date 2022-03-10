@@ -1,0 +1,5 @@
+name: 'user-web'
+port: 8021
+mysql:
+  host: 'localhost'
+  port: 3306
