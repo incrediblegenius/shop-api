@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"go.uber.org/zap"
@@ -13,6 +14,8 @@ import (
 	"shop-api/user-web/forms"
 	"shop-api/user-web/global"
 	"shop-api/user-web/global/response"
+	"shop-api/user-web/middlewares"
+	"shop-api/user-web/models"
 	"shop-api/user-web/proto"
 	"strconv"
 	"strings"
@@ -72,6 +75,9 @@ func GetUserList(ctx *gin.Context) {
 		zap.S().Errorw("[GetUserList] 连接 【用户服务失败】",
 			"msg", err.Error())
 	}
+	claims, _ := ctx.Get("claims")
+
+	zap.S().Infof("访问用户： %d", claims.(*models.CustomClaims).Id)
 
 	userSrvClient := proto.NewUserClient(userConn)
 
@@ -164,8 +170,32 @@ func PassWordLogin(c *gin.Context) {
 		} else {
 			//fmt.Println(passRsp.Success)
 			if passRsp.Success {
-				c.JSON(http.StatusOK, map[string]string{
-					"msg": "登陆成功",
+				// 生成Token
+				j := middlewares.NewJWT()
+				claims := models.CustomClaims{
+					Id:          uint(rsp.Id),
+					NickName:    rsp.NickName,
+					AuthorityId: uint(rsp.Role),
+					StandardClaims: jwt.StandardClaims{
+						NotBefore: time.Now().Unix(),
+						ExpiresAt: time.Now().Unix() + 60*60*24*30,
+						Issuer:    "Admin",
+					},
+				}
+
+				token, err := j.CreateToken(claims)
+
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{
+						"msg": "生成token失败",
+					})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{
+					"id":         rsp.Id,
+					"nick_name":  rsp.NickName,
+					"token":      token,
+					"expired_at": (time.Now().Unix() + 60*60*24*30) * 1000,
 				})
 			} else {
 				c.JSON(http.StatusBadRequest, map[string]string{
