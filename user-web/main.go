@@ -24,6 +24,8 @@ func main() {
 	if err := initialize.InitTrans("zh"); err != nil {
 		panic(err)
 	}
+	//5. 初始化srv连接
+	initialize.InitSrvConn()
 	// 注册验证器
 	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
 		_ = v.RegisterValidation("mobile", myvalidator.ValidateMobile)

@@ -6,8 +6,8 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"net/http"
@@ -68,25 +68,17 @@ func HandleValidatorError(c *gin.Context, err error) {
 }
 
 func GetUserList(ctx *gin.Context) {
-	//ip := "127.0.0.1"
-	//port := 8088
-	userConn, err := grpc.Dial(fmt.Sprintf("%s:%d", global.ServerConfig.UserSrcConfig.Host, global.ServerConfig.UserSrcConfig.Port), grpc.WithInsecure())
-	if err != nil {
-		zap.S().Errorw("[GetUserList] 连接 【用户服务失败】",
-			"msg", err.Error())
-	}
+
 	claims, _ := ctx.Get("claims")
 
 	zap.S().Infof("访问用户： %d", claims.(*models.CustomClaims).Id)
-
-	userSrvClient := proto.NewUserClient(userConn)
 
 	pn := ctx.DefaultQuery("pn", "0")
 	pnInt, _ := strconv.Atoi(pn)
 	pSize := ctx.DefaultQuery("psize", "10")
 	pSizeInt, _ := strconv.Atoi(pSize)
 
-	rsp, err := userSrvClient.GetUserList(context.Background(), &proto.PageInfo{
+	rsp, err := global.UserSrvClient.GetUserList(context.Background(), &proto.PageInfo{
 		Pn:    uint32(pnInt),
 		PSize: uint32(pSizeInt),
 	})
@@ -132,16 +124,23 @@ func PassWordLogin(c *gin.Context) {
 		HandleValidatorError(c, err)
 		return
 	}
-	userConn, err := grpc.Dial(fmt.Sprintf("%s:%d", global.ServerConfig.UserSrcConfig.Host, global.ServerConfig.UserSrcConfig.Port), grpc.WithInsecure())
-	if err != nil {
-		zap.S().Errorw("[PassWordLogin] 连接 【用户服务失败】",
-			"msg", err.Error())
+	if !store.Verify(passwordLoginForm.CaptchaId, passwordLoginForm.Captcha, true) {
+		c.JSON(http.StatusOK, gin.H{
+			"msg": "验证码错误",
+		})
+		return
 	}
-	userSrvClient := proto.NewUserClient(userConn)
+	//
+	//userConn, err := grpc.Dial(fmt.Sprintf("%s:%d", global.ServerConfig.UserSrcConfig.Host, global.ServerConfig.UserSrcConfig.Port), grpc.WithInsecure())
+	//if err != nil {
+	//	zap.S().Errorw("[PassWordLogin] 连接 【用户服务失败】",
+	//		"msg", err.Error())
+	//}
+	//userSrvClient := proto.NewUserClient(userConn)
 
 	// 登陆逻辑
 
-	if rsp, err := userSrvClient.GetUserByMobile(context.Background(), &proto.MobileRequest{
+	if rsp, err := global.UserSrvClient.GetUserByMobile(context.Background(), &proto.MobileRequest{
 		Mobile: passwordLoginForm.Mobile,
 	}); err != nil {
 
@@ -160,7 +159,7 @@ func PassWordLogin(c *gin.Context) {
 	} else {
 		// 查询到用户，并未检查密码
 		//zap.S().Debugf("error: %s %s ", passwordLoginForm.PassWord, rsp.PassWord)
-		if passRsp, passErr := userSrvClient.CheckPassWord(context.Background(), &proto.PasswordCheckInfo{
+		if passRsp, passErr := global.UserSrvClient.CheckPassWord(context.Background(), &proto.PasswordCheckInfo{
 			Password:          passwordLoginForm.PassWord,
 			EncryptedPassword: rsp.PassWord,
 		}); passErr != nil {
@@ -205,4 +204,64 @@ func PassWordLogin(c *gin.Context) {
 
 		}
 	}
+}
+
+func Register(c *gin.Context) {
+	//用户注册
+	registerForm := forms.RegisterForm{}
+	if err := c.ShouldBind(&registerForm); err != nil {
+		HandleValidatorError(c, err)
+		return
+	}
+	// 验证码校验
+	rdb := redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("%s:%d", global.ServerConfig.RedisInfo.Host, global.ServerConfig.RedisInfo.Port),
+	})
+
+	v, err := rdb.Get(context.Background(), registerForm.Mobile).Result()
+
+	if err == redis.Nil || v != registerForm.Code {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": "验证码错误",
+		})
+		return
+	}
+
+	user, err := global.UserSrvClient.CreateUser(context.Background(), &proto.CreateUserInfo{
+		NickName: registerForm.Mobile,
+		PassWord: registerForm.PassWord,
+		Mobile:   registerForm.Mobile,
+	})
+	if err != nil {
+		zap.S().Errorf("[Register] 查询【新建用户失败】 : %s", err.Error())
+		HandleGrpcErrorToHttp(err, c)
+		return
+	}
+	j := middlewares.NewJWT()
+	claims := models.CustomClaims{
+		Id:          uint(user.Id),
+		NickName:    user.NickName,
+		AuthorityId: uint(user.Role),
+		StandardClaims: jwt.StandardClaims{
+			NotBefore: time.Now().Unix(),
+			ExpiresAt: time.Now().Unix() + 60*60*24*30,
+			Issuer:    "Admin",
+		},
+	}
+
+	token, err := j.CreateToken(claims)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"msg": "生成token失败",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":         user.Id,
+		"nick_name":  user.NickName,
+		"token":      token,
+		"expired_at": (time.Now().Unix() + 60*60*24*30) * 1000,
+	})
+
 }
